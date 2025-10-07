@@ -1,0 +1,725 @@
+import logging, random, requests, json, time, os, hashlib, signal, sys
+from datetime import datetime, timedelta
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler('/home/Algoritek/bot.log')]
+)
+logger = logging.getLogger(__name__)
+
+# Конфигурация
+TOKEN = "8180790759:AAG9G76WQASopp_861C1vpVf5NNxD_9yAec"
+BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
+ADMIN_ID = 5237089765
+
+# Состояния
+(ADMIN_MENU, ADMIN_CREATE_CODE, ADMIN_VIEW_CODES) = range(20, 23)
+(START, STAGE1, STAGE2_DICE, STAGE2, STAGE2_REFORMULATE, STAGE3_FIRST_CHOICE, 
+ STAGE3_SECOND_CHOICE, STAGE4_CARDS, STAGE5_LADDER, STAGE5_CASE, COMPLETED) = range(11)
+
+# Ключи данных
+USER_REQUEST, STAGE2_ANSWER, STAGE3_SHAPES, CARD_DRAWN, CURRENT_STEP = "user_request", "stage2_answer", "stage3_shapes", "card_drawn", "current_step"
+
+# Глобальные переменные
+user_states, user_data, access_codes = {}, {}, {}
+REQUIRE_ACCESS_CODE = True
+
+# Данные изображений
+SHAPE_IMAGES = {
+    'square': 'AgACAgIAAxkBAAMKZmXwCq1s6v1i9hVlQq3hJp5Wv1AAAp3LMRtPb9BJQhVU8hLf0CkBAAMCAAN5AAMvBA',
+    'triangle': 'AgACAgIAAxkBAAMMZmXwDgABk3h9b8fN3QABH1MAAbKQ3AACncsxG09v0EmQx5wv3qk0JwEAAwIAA3kAAy8E',
+    'circle': 'AgACAgIAAxkBAAMOZmXwEf8YQrXv9Wt3v1hQY3sAAUcXAAKeyzEbT2_QSQAB8hUAAXzQTwEAAwIAA3kAAy8E',
+    'zigzag': 'AgACAgIAAxkBAAMQZmXwFp3gAAHwGvXQAAHp5zY3n2UAAQACn8sxG09v0En3w8t3tUfVJwEAAwIAA3kAAy8E',
+    'rectangle': 'AgACAgIAAxkBAAMKZmXwCq1s6v1i9hVlQq3hJp5Wv1AAAp3LMRtPb9BJQhVU8hLf0CkBAAMCAAN5AAMvBA'
+}
+
+SHAPE_DESCRIPTION_FILES = {
+    'square': '/home/Algoritek/images/психогеометрия-изображения-1.jpg',
+    'triangle': '/home/Algoritek/images/психогеометрия-изображения-2.jpg', 
+    'circle': '/home/Algoritek/images/психогеометрия-изображения-3.jpg',
+    'zigzag': '/home/Algoritek/images/психогеометрия-изображения-4.jpg',
+    'rectangle': '/home/Algoritek/images/психогеометрия-изображения-5.jpg'
+}
+
+METAPHORICAL_CARDS = [{"id": i, "image": f"/home/Algoritek/images/метафорические карты вызов-изображения-{i}.jpg"} for i in range(1, 53)]
+
+# Лестница Успеха
+LADDER_OF_SUCCESS = [
+    {"number": 1, "title": "🎯 Целеполагание / Restart", "description": "Определи конечную точку своего пути.", "task": "📝 Задание: опиши свою идеальную профессиональную реальность через 6 месяцев.", "options": ["🔘 Хочу метафорическую карту состояния", "🔘 Хочу бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 2, "title": "🧠 Установки и убеждения", "description": "Исследуй свои ограничения.", "task": "🧩 Задание: Напиши 3 установки, которые мешают тебе двигаться.", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Взять метафорическую карту «откуда родом моя установка»", "🔘 Иду дальше"]},
+    {"number": 3, "title": "😨 Страхи, травмы и выгоды", "description": "За каждым торможением — есть выгода.", "task": "🧩 Задание: Назови один страх, одну вторичную выгоду и одно травму.", "options": ["🔘 Взять метафоричную карту", "🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 4, "title": "👥 Окружение и нетворкинг", "description": "Ты — не в вакууме.", "task": "🧩 Задание: Нарисуй или опиши своё ближайшее окружение как «экосистему».", "options": ["🔘 Хочу метафорическую карту 'мои связи'", "🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 5, "title": "💡 Мозговой штурм", "description": "Это поле — про взрыв идей.", "task": "🧩 Задание: Придумай 10 способов заработать.", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 6, "title": "🚀 Стратегия продвижения", "description": "Теперь — пора выбрать путь.", "task": "🧩 Задание: Напиши 5 способов продвигать себя/свой проект.", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 7, "title": "💎 Ценности и критерии", "description": "Что для тебя важно по-настоящему?", "task": "🧩 Задание: Назови 3 главные ценности в жизни и 3 — в профессиональной сфере.", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 8, "title": "⚡ Энергия, сила и ресурсы", "description": "Чтобы быть в потоке — нужна подпитка.", "task": "🧩 Задание: Назови 3 источника энергии и 3 главных утечки.", "options": ["🔘 Вытянуть метафорическую карту 'мой ресурс'", "🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 9, "title": "📢 Манифестация", "description": "Ты готов(а) заявить о себе.", "task": "🧩 Задание: Напиши манифест: «Я есть… Я выбираю… Я иду к…»", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Иду дальше"]},
+    {"number": 10, "title": "🌍 Миссия и предназначение", "description": "Где твоя глубинная задача?", "task": "🧩 Задание: Если бы всё, что ты делаешь, было способом служить — чему ты служишь?", "options": ["🔘 Бросить кубик и вытянуть карту", "🔘 Вытянуть таблетки от самосаботажа (до 5 штук)", "🔘 Вытянуть полезные навыки и привычки (до 3 штук)", "🔘 Иду дальше"]},
+    {"number": 11, "title": "📚 Решить кейс", "description": "Это поле — про действие.", "task": "🧩 Задание: Реши практический кейс из выбранной категории.", "options": ["🔘 Вытянуть кейс", "🔘 Иду дальше"]},
+    {"number": 12, "title": "🏆 Финал: Возврат на 1 ступень", "description": "Вернись к началу, но уже в новом качестве.", "task": "🧭 Подведение итогов", "options": ["🔘 Хочу сохранить свой путь", "🔘 Хочу оставить отзыв", "🔘 Завершить игру"]}
+]
+
+CASE_STUDIES = [
+    {"title": "Кейс: Выбор между стабильностью и риском", "description": "Тебе предлагают две работы.", "questions": ["Что для тебя важнее сейчас: безопасность или рост?", "Какой вариант больше соответствует твоим ценностям?", "Что бы ты посоветовал другу в такой ситуации?"]},
+    {"title": "Кейс: Баланс работы и личной жизни", "description": "Ты чувствуешь выгорание от переработок.", "questions": ["Какие границы ты можешь установить?", "Что даёт тебе энергию вне работы?", "Как делегировать часть задач?"]}
+]
+
+def signal_handler(signum, frame):
+    logger.info("Получен сигнал завершения. Завершаем работу...")
+    sys.exit(0)
+
+# Функции для работы с кодами доступа
+def generate_access_code(length=8, expires_hours=24):
+    code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=length))
+    return code, datetime.now() + timedelta(hours=expires_hours)
+
+def save_access_code(code, expires_at, max_uses=1):
+    access_codes[code] = {'created_at': datetime.now(), 'expires_at': expires_at, 'max_uses': max_uses, 'used_count': 0, 'used_by': []}
+    return code
+
+def is_access_code_valid(code):
+    if code not in access_codes: return False
+    code_data = access_codes[code]
+    if datetime.now() > code_data['expires_at']:
+        del access_codes[code]
+        return False
+    return code_data['used_count'] < code_data['max_uses']
+
+def use_access_code(code, user_id):
+    if not is_access_code_valid(code): return False
+    access_codes[code]['used_count'] += 1
+    access_codes[code]['used_by'].append({'user_id': user_id, 'used_at': datetime.now()})
+    return True
+
+# Функции работы с Telegram API
+def api_request(method, data=None, files=None):
+    url = f"{BASE_URL}/{method}"
+    try:
+        if files: return requests.post(url, data=data, files=files, timeout=10).json()
+        return requests.post(url, json=data, timeout=10).json()
+    except Exception as e:
+        logger.error(f"API error {method}: {e}")
+        return None
+
+def send_photo(chat_id, photo_path, caption=None, reply_markup=None):
+    payload = {'chat_id': chat_id}
+    if caption: payload['caption'] = caption
+    if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
+    
+    if photo_path.startswith('AgAC'):
+        payload['photo'] = photo_path
+        return api_request('sendPhoto', payload)
+    else:
+        try:
+            with open(photo_path, 'rb') as photo_file:
+                return api_request('sendPhoto', payload, {'photo': photo_file})
+        except FileNotFoundError:
+            logger.error(f"File not found: {photo_path}")
+            send_message(chat_id, "⚠️ Изображение временно недоступно")
+            return None
+
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    payload = {'chat_id': chat_id, 'text': text}
+    if parse_mode: payload['parse_mode'] = parse_mode
+    if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
+    return api_request('sendMessage', payload)
+
+def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    payload = {'chat_id': chat_id, 'message_id': message_id, 'text': text}
+    if parse_mode: payload['parse_mode'] = parse_mode
+    if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
+    return api_request('editMessageText', payload)
+
+def answer_callback_query(callback_query_id, text=None):
+    payload = {'callback_query_id': callback_query_id}
+    if text: payload['text'] = text
+    return api_request('answerCallbackQuery', payload)
+
+def delete_message(chat_id, message_id):
+    return api_request('deleteMessage', {'chat_id': chat_id, 'message_id': message_id})
+
+# Клавиатуры
+def create_reply_keyboard(buttons, resize_keyboard=True):
+    return {'keyboard': buttons, 'resize_keyboard': resize_keyboard, 'one_time_keyboard': False}
+
+def create_inline_keyboard(buttons):
+    return {'inline_keyboard': buttons}
+
+def create_inline_button(text, callback_data):
+    return {'text': text, 'callback_data': callback_data}
+
+def get_universal_navigation_buttons():
+    return [['🆘 Помощь', '👤 Мой ID'], ['↩️ В главное меню']]
+
+def get_main_menu_keyboard():
+    return create_reply_keyboard([['🎯 НАЧАТЬ ИГРУ'], ['🆘 Помощь', '👤 Мой ID']])
+
+def get_admin_menu_keyboard():
+    return create_reply_keyboard([['🔑 Создать код доступа', '📋 Просмотреть коды'], ['⬅️ В главное меню']])
+
+def get_stage_keyboard(stage):
+    keyboards = {
+        'stage1': create_reply_keyboard([['⬅️ Назад', '➡️ Далее']] + get_universal_navigation_buttons()),
+        'stage2': create_reply_keyboard([['⬅️ Назад', '🎲 Бросить кубик']] + get_universal_navigation_buttons()),
+        'stage3': create_reply_keyboard([['⬅️ Назад', '🔘 Выбрать фигуры']] + get_universal_navigation_buttons()),
+        'stage4': create_reply_keyboard([['🎴 Вытянуть карту', '🤔 Помощь в интерпретации'], ['⬅️ Назад', '🪜 К Лестнице Успеха']] + get_universal_navigation_buttons()),
+        'stage5_case': create_reply_keyboard([['📝 Ответить на вопросы кейса', '🔘 Следующий вопрос'], ['🎴 Вытянуть карту для подсказки', '⬅️ Назад к ступеням'], ['↩️ В главное меню']])
+    }
+    return keyboards.get(stage, get_main_menu_keyboard())
+
+def get_stage5_ladder_keyboard(step_number):
+    if step_number >= len(LADDER_OF_SUCCESS): step_number = len(LADDER_OF_SUCCESS) - 1
+    current_step = LADDER_OF_SUCCESS[step_number]
+    
+    buttons = [[option] for option in current_step["options"]]
+    nav_buttons = []
+    if step_number > 0: nav_buttons.append('⬅️ Предыдущая ступень')
+    if step_number < len(LADDER_OF_SUCCESS) - 1: nav_buttons.append('➡️ Следующая ступень')
+    if nav_buttons: buttons.append(nav_buttons)
+    
+    buttons.append(['🎴 Вытянуть карту'])
+    buttons.extend(get_universal_navigation_buttons())
+    return create_reply_keyboard(buttons)
+
+# Административные функции
+def admin_menu(chat_id, user_id):
+    user_states[user_id] = ADMIN_MENU
+    send_message(chat_id, "👨‍💻 <b>Панель администратора</b>\n\nВыберите действие:", parse_mode='HTML', reply_markup=get_admin_menu_keyboard())
+
+def admin_create_code(chat_id, user_id):
+    user_states[user_id] = ADMIN_CREATE_CODE
+    code, expires_at = generate_access_code()
+    save_access_code(code, expires_at)
+    message = f"✅ <b>Код доступа создан!</b>\n\n🔑 <b>Код:</b> <code>{code}</code>\n⏰ <b>Действителен до:</b> {expires_at.strftime('%d.%m.%Y %H:%M')}\n👥 <b>Максимум использований:</b> 1"
+    send_message(chat_id, message, parse_mode='HTML', reply_markup=get_admin_menu_keyboard())
+
+def admin_view_codes(chat_id, user_id):
+    user_states[user_id] = ADMIN_VIEW_CODES
+    if not access_codes:
+        send_message(chat_id, "❌ Нет активных кодов доступа.", reply_markup=get_admin_menu_keyboard())
+        return
+    message = "📋 <b>Активные коды доступа:</b>\n\n"
+    for code, data in access_codes.items():
+        status = "✅ Активен" if is_access_code_valid(code) else "❌ Неактивен"
+        message += f"🔑 <b>Код:</b> <code>{code}</code>\n{status}\n⏰ <b>Действует до:</b> {data['expires_at'].strftime('%d.%m.%Y %H:%M')}\n👥 <b>Использован:</b> {data['used_count']}/{data['max_uses']} раз\n\n"
+    send_message(chat_id, message, parse_mode='HTML', reply_markup=get_admin_menu_keyboard())
+
+def show_help(chat_id, user_id):
+    help_text = """🆘 <b>Помощь по игре "Вызов!"</b>
+
+<b>Этапы игры:</b>
+1. 🧩 Формулировка запроса
+2. 🎲 Калибровка запроса  
+3. 🔺 Психогеометрия личности
+4. 🃏 Метафорические карты
+5. 🪜 Лестница Успеха (12 ступеней)"""
+    send_message(chat_id, help_text, parse_mode='HTML')
+
+def show_my_id(chat_id, user_id, first_name, username):
+    user_info = f"👤 <b>Ваша информация:</b>\n\n🆔 <b>ID пользователя:</b> <code>{user_id}</code>\n👤 <b>Имя:</b> {first_name}"
+    if username: user_info += f"\n📱 <b>Username:</b> @{username}"
+    
+    current_state = user_states.get(user_id, START)
+    if current_state in [ADMIN_MENU, ADMIN_CREATE_CODE, ADMIN_VIEW_CODES]:
+        reply_markup = get_admin_menu_keyboard()
+    elif current_state == STAGE5_LADDER:
+        reply_markup = get_stage5_ladder_keyboard(user_data.get(user_id, {}).get(CURRENT_STEP, 0))
+    elif current_state == STAGE5_CASE:
+        reply_markup = get_stage_keyboard('stage5_case')
+    elif current_state == STAGE4_CARDS:
+        reply_markup = get_stage_keyboard('stage4')
+    elif current_state in [STAGE3_FIRST_CHOICE, STAGE3_SECOND_CHOICE]:
+        reply_markup = get_stage_keyboard('stage3')
+    elif current_state in [STAGE2_DICE, STAGE2, STAGE2_REFORMULATE]:
+        reply_markup = get_stage_keyboard('stage2')
+    elif current_state == STAGE1:
+        reply_markup = get_stage_keyboard('stage1')
+    else:
+        reply_markup = get_main_menu_keyboard()
+    
+    send_message(chat_id, user_info, parse_mode='HTML', reply_markup=reply_markup)
+
+def go_to_main_menu(chat_id, user_id):
+    user_states[user_id] = START
+    user_data[user_id] = {}
+    send_message(chat_id, "Возвращаемся в главное меню...", reply_markup=get_main_menu_keyboard())
+
+def go_back(chat_id, user_id):
+    current_state = user_states.get(user_id, START)
+    state_actions = {
+        STAGE1: lambda: (user_states.update({user_id: START}), send_message(chat_id, "Возвращаемся в главное меню...", reply_markup=get_main_menu_keyboard())),
+        STAGE2_DICE: lambda: (user_states.update({user_id: STAGE1}), stage_intro(chat_id, user_id)),
+        STAGE2: lambda: (user_states.update({user_id: STAGE1}), stage_intro(chat_id, user_id)),
+        STAGE2_REFORMULATE: lambda: (user_states.update({user_id: STAGE1}), stage_intro(chat_id, user_id)),
+        STAGE3_FIRST_CHOICE: lambda: (user_states.update({user_id: STAGE2}), send_message(chat_id, "Возвращаемся к этапу 2...", reply_markup=get_stage_keyboard('stage2'))),
+        STAGE3_SECOND_CHOICE: lambda: (user_states.update({user_id: STAGE2}), send_message(chat_id, "Возвращаемся к этапу 2...", reply_markup=get_stage_keyboard('stage2'))),
+        STAGE4_CARDS: lambda: (user_states.update({user_id: STAGE3_FIRST_CHOICE}), send_message(chat_id, "Возвращаемся к этапу 3...", reply_markup=get_stage_keyboard('stage3'))),
+        STAGE5_LADDER: lambda: (user_states.update({user_id: STAGE4_CARDS}), stage4_intro(chat_id, user_id)),
+        STAGE5_CASE: lambda: (user_states.update({user_id: STAGE5_LADDER}), show_current_step(chat_id, user_id))
+    }
+    state_actions.get(current_state, lambda: go_to_main_menu(chat_id, user_id))()
+
+# Основные функции игры
+def send_welcome_message(chat_id, first_name):
+    welcome_text = f"""👋 Привет, {first_name}! Добро пожаловать в психологическую игру «Вызов!»
+
+🌟 Это путешествие к себе через 5 этапов:
+1. 🧩 Формулировка запроса
+2. 🎲 Калибровка интуицией  
+3. 🔺 Психогеометрия личности
+4. 🃏 Метафорические карты
+5. 🪜 Лестница Успеха (12 ступеней)
+
+Готовы начать?"""
+    send_message(chat_id, welcome_text, reply_markup=get_main_menu_keyboard())
+
+def start(chat_id, user_id, first_name, access_code=None):
+    if REQUIRE_ACCESS_CODE:
+        if not access_code or not is_access_code_valid(access_code) or not use_access_code(access_code, user_id):
+            send_message(chat_id, "❌ Для доступа к игре требуется код доступа. Обратитесь к администратору.", reply_markup=get_main_menu_keyboard())
+            return
+        send_message(chat_id, f"✅ Код доступа принят! Добро пожаловать в игру, {first_name}!", reply_markup=get_main_menu_keyboard())
+
+    user_states[user_id] = START
+    user_data[user_id] = {}
+    send_welcome_message(chat_id, first_name)
+
+# ЭТАП 1
+def stage_intro(chat_id, user_id):
+    user_states[user_id] = STAGE1
+    stage1_text = """🧩 <b>Этап 1. Формулируем запрос</b>
+
+💬 С каким вопросом или целью вы пришли в игру?
+
+📌 <b>Напишите коротко ваш запрос:</b>"""
+    send_message(chat_id, stage1_text, parse_mode='HTML', reply_markup=get_stage_keyboard('stage1'))
+
+def stage1_get_request(chat_id, user_id, text):
+    user_data[user_id][USER_REQUEST] = text
+    user_states[user_id] = STAGE2_DICE
+    send_message(chat_id, f"✅ <b>Запрос сохранен:</b> \n«{text}»\n\n🎲 <b>Этап 2. Калибровка запроса</b>\n\nПроверим вашу интуицию! Бросьте кубик.", parse_mode='HTML', reply_markup=get_stage_keyboard('stage2'))
+    send_message(chat_id, "Нажмите кнопку чтобы бросить кубик:", reply_markup=create_inline_keyboard([[create_inline_button("🎲 Бросить кубик", "throw_dice")]]))
+
+# ЭТАП 2
+def stage2_throw_dice(chat_id, message_id, user_id, callback_query_id):
+    answer_callback_query(callback_query_id)
+    dice_roll = random.randint(1, 6)
+    is_even = dice_roll % 2 == 0
+    result_text = "ДА" if is_even else "НЕТ"
+
+    user_data[user_id][STAGE2_ANSWER] = result_text
+    user_states[user_id] = STAGE2
+
+    message = f"🎲 Выпало: {dice_roll} ({result_text})\n\n" + ("✅ Отлично! Ваш запрос резонирует с интуицией." if is_even else "🤔 Интересно! Возможно, стоит глубже исследовать запрос.")
+    
+    if is_even:
+        keyboard = create_inline_keyboard([[create_inline_button("➡️ Далее", "next_stage")]])
+    else:
+        keyboard = create_inline_keyboard([[create_inline_button("🔄 Переформулировать", "reformulate")], [create_inline_button("➡️ Продолжить", "next_stage")]])
+    
+    edit_message_text(chat_id, message_id, message, reply_markup=keyboard)
+
+def stage2_reformulate(chat_id, message_id, user_id, callback_query_id):
+    answer_callback_query(callback_query_id)
+    user_states[user_id] = STAGE2_REFORMULATE
+    edit_message_text(chat_id, message_id, "🔄 <b>Переформулируем запрос</b>\n\nПопробуйте посмотреть на ситуацию под другим углом. Напишите новый вариант:", parse_mode='HTML')
+
+def stage2_get_reformulation(chat_id, user_id, text):
+    user_data[user_id][USER_REQUEST] = text
+    user_states[user_id] = STAGE2_DICE
+    send_message(chat_id, f"✅ <b>Новый запрос:</b> \n«{text}»\n\nПроверим его снова!", parse_mode='HTML', reply_markup=get_stage_keyboard('stage2'))
+    send_message(chat_id, "Нажмите кнопку чтобы бросить кубик:", reply_markup=create_inline_keyboard([[create_inline_button("🎲 Бросить снова", "throw_dice")]]))
+
+def stage2_next(chat_id, message_id, user_id, callback_query_id):
+    answer_callback_query(callback_query_id)
+    user_states[user_id] = STAGE3_FIRST_CHOICE
+    send_message(chat_id, "🔺 <b>Этап 3. Психогеометрия личности</b>\n\nВыберите 2 фигуры из 5, которые вам ближе всего.", parse_mode='HTML', reply_markup=get_stage_keyboard('stage3'))
+    send_message(chat_id, "Нажмите кнопку чтобы начать выбор:", reply_markup=create_inline_keyboard([[create_inline_button("🔘 Выбрать фигуры", "ready_for_shapes")]]))
+
+# ЭТАП 3
+def stage3_show_shapes(chat_id, message_id, user_id, callback_query_id):
+    answer_callback_query(callback_query_id)
+    try: delete_message(chat_id, message_id)
+    except: pass
+    
+    for shape_key, file_id in SHAPE_IMAGES.items():
+        send_photo(chat_id, file_id)
+        time.sleep(0.5)
+    
+    keyboard = create_inline_keyboard([
+        [create_inline_button("🔷 Квадрат", "shape_square")],
+        [create_inline_button("🔺 Треугольник", "shape_triangle")],
+        [create_inline_button("⚪ Круг", "shape_circle")],
+        [create_inline_button("🌀 Зигзаг", "shape_zigzag")],
+        [create_inline_button("🔶 Прямоугольник", "shape_rectangle")]
+    ])
+    send_message(chat_id, "Выберите первую фигуру:", reply_markup=keyboard)
+
+def stage3_first_choice(chat_id, message_id, user_id, shape_key, callback_query_id):
+    answer_callback_query(callback_query_id)
+    try: delete_message(chat_id, message_id)
+    except: pass
+    
+    if user_id not in user_data: user_data[user_id] = {}
+    user_data[user_id][STAGE3_SHAPES] = [shape_key]
+    user_states[user_id] = STAGE3_SECOND_CHOICE
+    
+    remaining_shapes = [s for s in ['square', 'triangle', 'circle', 'zigzag', 'rectangle'] if s != shape_key]
+    shape_names = {"square": "🔷 Квадрат", "triangle": "🔺 Треугольник", "circle": "⚪ Круг", 'zigzag': "🌀 Зигзаг", "rectangle": "🔶 Прямоугольник"}
+    keyboard_buttons = [[create_inline_button(shape_names[shape], f"shape_{shape}")] for shape in remaining_shapes]
+    
+    send_message(chat_id, "Отлично! Теперь выберите вторую фигуру:", reply_markup=create_inline_keyboard(keyboard_buttons))
+
+def stage3_second_choice(chat_id, message_id, user_id, shape_key, callback_query_id):
+    answer_callback_query(callback_query_id)
+    try: delete_message(chat_id, message_id)
+    except: pass
+    
+    if user_id not in user_data: user_data[user_id] = {}
+    if STAGE3_SHAPES not in user_data[user_id]: user_data[user_id][STAGE3_SHAPES] = []
+    user_data[user_id][STAGE3_SHAPES].append(shape_key)
+    
+    if len(user_data[user_id][STAGE3_SHAPES]) < 2:
+        send_message(chat_id, "Ошибка: не выбраны фигуры. Начните заново с /start", reply_markup=get_main_menu_keyboard())
+        user_states[user_id] = START
+        return
+    
+    send_message(chat_id, "✨ <b>Отлично! Этап психогеометрии завершен.</b>\n\nВаши фигуры расскажут о ваших сильных сторонах.", parse_mode='HTML', reply_markup=get_stage_keyboard('stage3'))
+    
+    shape_descriptions = {
+        'square': "🔷 Квадрат: Организованный, практичный, надежный",
+        'triangle': "🔺 Треугольник: Лидер, целеустремленный, амбициозный", 
+        'circle': "⚪ Круг: Дружелюбный, заботливый, коммуникабельный",
+        'zigzag': "🌀 Зигзаг: Креативный, инновационный, непредсказуемый",
+        'rectangle': "🔶 Прямоугольник: В поиске, в переходном состоянии"
+    }
+    
+    for shape in user_data[user_id][STAGE3_SHAPES]:
+        if shape in SHAPE_DESCRIPTION_FILES:
+            send_photo(chat_id, SHAPE_DESCRIPTION_FILES[shape])
+            time.sleep(1)
+        else:
+            send_message(chat_id, f"📝 {shape_descriptions.get(shape, 'Описание фигуры')}")
+    
+    time.sleep(2)
+    stage4_intro(chat_id, user_id)
+
+# ЭТАП 4
+def stage4_intro(chat_id, user_id):
+    user_states[user_id] = STAGE4_CARDS
+    send_message(chat_id, "🃏 <b>Этап 4. Метафорические карты</b>\n\nКарты - это зеркало вашего бессознательного. Вы можете вытягивать их в любой момент.", parse_mode='HTML', reply_markup=get_stage_keyboard('stage4'))
+
+def draw_metaphorical_card(chat_id, user_id):
+    card = random.choice(METAPHORICAL_CARDS)
+    user_data[user_id][CARD_DRAWN] = card
+    send_photo(chat_id, card['image'], caption="🎴 Выпала карта!")
+    time.sleep(1)
+    
+    current_state = user_states.get(user_id, START)
+    reply_markup = get_stage5_ladder_keyboard(user_data.get(user_id, {}).get(CURRENT_STEP, 0)) if current_state == STAGE5_LADDER else get_stage_keyboard('stage4')
+    send_message(chat_id, "🎴 <b>Выпала карта!</b>\n\n💭 Поразмышляйте над образами и ассоциациями.", parse_mode='HTML', reply_markup=reply_markup)
+
+def interpret_card(chat_id, user_id):
+    if user_id in user_data and CARD_DRAWN in user_data[user_id]:
+        card = user_data[user_id][CARD_DRAWN]
+        interpretation_text = f"""🤔 <b>Интерпретация карты #{card['id']}</b>
+
+Задайте себе вопросы:
+• Что я вижу на карте?
+• Какие чувства вызывает?
+• Как это связано с моим запросом?"""
+        
+        current_state = user_states.get(user_id, START)
+        reply_markup = get_stage5_ladder_keyboard(user_data.get(user_id, {}).get(CURRENT_STEP, 0)) if current_state == STAGE5_LADDER else get_stage_keyboard('stage4')
+        send_message(chat_id, interpretation_text, parse_mode='HTML', reply_markup=reply_markup)
+    else:
+        send_message(chat_id, "Сначала вытяните карту.", reply_markup=get_stage_keyboard('stage4'))
+
+# ЭТАП 5
+def stage5_intro(chat_id, user_id):
+    user_states[user_id] = STAGE5_LADDER
+    user_data[user_id][CURRENT_STEP] = 0
+    send_message(chat_id, "🪜 <b>Переход к игровому полю: 12 ступеней «Лестницы Успеха»</b>\n\nТеперь начинается настоящее движение.\nКаждое поле — это ступень трансформации, твой внутренний и внешний шаг.\n\n📍 У тебя будет выбор:\n– пройти поле интуитивно\n– бросить кубик  \n– вытянуть карту\n– сделать задание\n\nГотов подняться на первую ступень?", parse_mode='HTML', reply_markup=get_stage5_ladder_keyboard(0))
+    show_current_step(chat_id, user_id)
+
+def show_current_step(chat_id, user_id):
+    current_step_num = user_data.get(user_id, {}).get(CURRENT_STEP, 0)
+    if current_step_num >= len(LADDER_OF_SUCCESS): current_step_num = len(LADDER_OF_SUCCESS) - 1
+    step = LADDER_OF_SUCCESS[current_step_num]
+    
+    step_text = f"""<b>Ступень {step['number']}: {step['title']}</b>
+
+{step['description']}
+
+<b>Задание:</b>
+{step['task']}
+
+Прогресс: {current_step_num + 1}/{len(LADDER_OF_SUCCESS)} ступеней"""
+    
+    send_message(chat_id, step_text, parse_mode='HTML', reply_markup=get_stage5_ladder_keyboard(current_step_num))
+
+def handle_ladder_navigation(chat_id, user_id, text):
+    if user_id not in user_data: user_data[user_id] = {}
+    current_step = user_data[user_id].get(CURRENT_STEP, 0)
+    
+    navigation_actions = {
+        '➡️ Следующая ступень': lambda: (user_data[user_id].update({CURRENT_STEP: current_step + 1}), show_current_step(chat_id, user_id)) if current_step < len(LADDER_OF_SUCCESS) - 1 else send_message(chat_id, "🎉 Поздравляем! Вы достигли вершины Лестницы!", reply_markup=get_stage5_ladder_keyboard(current_step)),
+        '⬅️ Предыдущая ступень': lambda: (user_data[user_id].update({CURRENT_STEP: current_step - 1}), show_current_step(chat_id, user_id)) if current_step > 0 else send_message(chat_id, "Это первая ступень Лестницы.", reply_markup=get_stage5_ladder_keyboard(current_step)),
+        '🔘 Иду дальше': lambda: (user_data[user_id].update({CURRENT_STEP: current_step + 1}), show_current_step(chat_id, user_id)) if current_step < len(LADDER_OF_SUCCESS) - 1 else complete_game(chat_id, user_id),
+        '🔘 Вытянуть кейс': lambda: start_case_study(chat_id, user_id),
+        '🔘 Хочу сохранить свой путь': lambda: save_user_journey(chat_id, user_id),
+        '🔘 Хочу оставить отзыв': lambda: request_feedback(chat_id, user_id),
+        '🏁 Завершить игру': lambda: complete_game(chat_id, user_id),
+        '🎴 Вытянуть карту': lambda: draw_metaphorical_card(chat_id, user_id),
+        '🆘 Помощь': lambda: show_help(chat_id, user_id),
+        '👤 Мой ID': lambda: show_my_id(chat_id, user_id, "Пользователь", ""),
+        '↩️ В главное меню': lambda: go_to_main_menu(chat_id, user_id)
+    }
+    
+    for key, action in navigation_actions.items():
+        if key in text:
+            action()
+            return
+    
+    if '🔘 Хочу метафорическую карту' in text or '🔘 Взять метафорическую карту' in text or '🔘 Взять метафоричную карту' in text:
+        draw_metaphorical_card(chat_id, user_id)
+    elif '🔘 Бросить кубик' in text:
+        dice_roll = random.randint(1, 6)
+        send_message(chat_id, f"🎲 Выпало: {dice_roll}\n\nИнтересно! Это число может быть подсказкой для размышлений.", reply_markup=get_stage5_ladder_keyboard(current_step))
+        draw_metaphorical_card(chat_id, user_id)
+    elif '🔘 Вытянуть таблетки от самосаботажа' in text:
+        send_message(chat_id, "💊 <b>Таблетки от самосаботажа:</b>\n\n1. Осознанность\n2. Маленькие шаги\n3. Самоподдержка\n4. Отслеживание прогресса\n5. Празднование успехов", parse_mode='HTML', reply_markup=get_stage5_ladder_keyboard(current_step))
+    elif '🔘 Вытянуть полезные навыки' in text:
+        send_message(chat_id, "🛠️ <b>Полезные навыки и привычки:</b>\n\n1. Тайм-менеджмент\n2. Эмоциональный интеллект\n3. Навык делегирования", parse_mode='HTML', reply_markup=get_stage5_ladder_keyboard(current_step))
+    else:
+        handle_text_response(chat_id, user_id, text)
+
+def handle_text_response(chat_id, user_id, text):
+    current_state = user_states.get(user_id, START)
+    current_step = user_data.get(user_id, {}).get(CURRENT_STEP, 0)
+    
+    if current_state == STAGE5_LADDER:
+        if 'user_answers' not in user_data[user_id]: user_data[user_id]['user_answers'] = {}
+        user_data[user_id]['user_answers'][current_step] = text
+        send_message(chat_id, f"✅ Ответ на ступень {current_step + 1} сохранен! Можете продолжить работу со ступенью.", reply_markup=get_stage5_ladder_keyboard(current_step))
+    elif current_state == STAGE5_CASE:
+        if 'case_answers' not in user_data[user_id]: user_data[user_id]['case_answers'] = []
+        user_data[user_id]['case_answers'].append(text)
+        send_message(chat_id, "✅ Ответ на вопрос кейса сохранен! Продолжайте.", reply_markup=get_stage_keyboard('stage5_case'))
+
+def start_case_study(chat_id, user_id):
+    user_states[user_id] = STAGE5_CASE
+    case = random.choice(CASE_STUDIES)
+    user_data[user_id]['current_case'] = case
+    user_data[user_id]['case_question'] = 0
+    send_message(chat_id, f"📚 <b>Кейс: {case['title']}</b>\n\n{case['description']}\n\n<b>Вопрос для размышления:</b>\n{case['questions'][0]}", parse_mode='HTML', reply_markup=get_stage_keyboard('stage5_case'))
+
+def handle_case_study(chat_id, user_id, text):
+    case_actions = {
+        '📝 Ответить на вопросы кейса': lambda: send_message(chat_id, f"💭 Ответьте на вопрос: {user_data[user_id].get('current_case', {}).get('questions', [''])[user_data[user_id].get('case_question', 0)]}\n\nНапишите ваш ответ текстом."),
+        '🔘 Следующий вопрос': lambda: handle_next_question(chat_id, user_id),
+        '⬅️ Назад к ступеням': lambda: (user_states.update({user_id: STAGE5_LADDER}), show_current_step(chat_id, user_id)),
+        '🎴 Вытянуть карту для подсказки': lambda: draw_metaphorical_card(chat_id, user_id),
+        '↩️ В главное меню': lambda: go_to_main_menu(chat_id, user_id)
+    }
+    
+    for key, action in case_actions.items():
+        if key == text:
+            action()
+            return
+
+def handle_next_question(chat_id, user_id):
+    case = user_data[user_id].get('current_case')
+    question_index = user_data[user_id].get('case_question', 0) + 1
+    if question_index < len(case['questions']):
+        user_data[user_id]['case_question'] = question_index
+        send_message(chat_id, f"➡️ <b>Следующий вопрос:</b>\n\n{case['questions'][question_index]}", parse_mode='HTML', reply_markup=get_stage_keyboard('stage5_case'))
+    else:
+        send_message(chat_id, "✅ Все вопросы кейса пройдены! Возвращаемся к Лестнице Успеха.")
+        user_states[user_id] = STAGE5_LADDER
+        show_current_step(chat_id, user_id)
+
+def save_user_journey(chat_id, user_id):
+    send_message(chat_id, "📊 <b>Ваш путь сохранен!</b>\n\nВы прошли все ступени Лестницы Успеха. Это только начало вашего преображения!", parse_mode='HTML', reply_markup=get_main_menu_keyboard())
+
+def request_feedback(chat_id, user_id):
+    send_message(chat_id, "💌 <b>Благодарим за участие в игре!</b>\n\nПоделитесь вашими впечатлениями:\n• Что было самым ценным?\n• Какие инсайты вы получили?\n• Что можно улучшить в игре?\n\nНапишите ваш отзыв текстом.", parse_mode='HTML')
+
+def complete_game(chat_id, user_id):
+    send_message(chat_id, "🏆 <b>Поздравляем! Вы прошли все ступени Лестницы Успеха!</b>\n\nЭто было удивительное путешествие к себе. Помните: трансформация — это процесс, а не конечная точка.\n\n🔄 Вы можете пройти игру снова с новым запросом или углубиться в те ступени, которые вызвали наибольший отклик.", parse_mode='HTML', reply_markup=get_main_menu_keyboard())
+    user_states[user_id] = COMPLETED
+
+# Основная функция обработки сообщений
+def process_update(update):
+    try:
+        logger.info(f"Получено обновление: {update}")
+        
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            user_id = message['from']['id']
+            first_name = message['from'].get('first_name', 'Пользователь')
+            username = message['from'].get('username', '')
+            text = message.get('text', '').strip()
+
+            is_admin = (user_id == ADMIN_ID)
+            current_state = user_states.get(user_id, START)
+            
+            if user_id not in user_states: user_states[user_id] = START
+            if user_id not in user_data: user_data[user_id] = {}
+
+            # Обработка навигации по Лестнице Успеха
+            if current_state == STAGE5_LADDER:
+                handle_ladder_navigation(chat_id, user_id, text)
+                return
+            elif current_state == STAGE5_CASE:
+                handle_case_study(chat_id, user_id, text)
+                return
+
+            # Административные команды
+            if is_admin and text == '/admin':
+                admin_menu(chat_id, user_id)
+                return
+
+            if is_admin and current_state in [ADMIN_MENU, ADMIN_CREATE_CODE, ADMIN_VIEW_CODES]:
+                admin_actions = {
+                    '🔑 Создать код доступа': lambda: admin_create_code(chat_id, user_id),
+                    '📋 Просмотреть коды': lambda: admin_view_codes(chat_id, user_id),
+                    '⬅️ В главное меню': lambda: go_to_main_menu(chat_id, user_id)
+                }
+                if text in admin_actions:
+                    admin_actions[text]()
+                return
+
+            # Обработка команды /start
+            if text.startswith('/start'):
+                parts = text.split()
+                access_code = parts[1] if len(parts) > 1 else None
+                start(chat_id, user_id, first_name, access_code)
+                return
+
+            # Обработка основных этапов игры
+            stage_actions = {
+                (START, '🎯 НАЧАТЬ ИГРУ'): lambda: stage_intro(chat_id, user_id),
+                (STAGE1, text): lambda: stage1_get_request(chat_id, user_id, text),
+                (STAGE2_REFORMULATE, text): lambda: stage2_get_reformulation(chat_id, user_id, text),
+                (STAGE4_CARDS, '🎴 Вытянуть карту'): lambda: draw_metaphorical_card(chat_id, user_id),
+                (STAGE4_CARDS, '🤔 Помощь в интерпретации'): lambda: interpret_card(chat_id, user_id),
+                (STAGE4_CARDS, '🪜 К Лестнице Успеха'): lambda: stage5_intro(chat_id, user_id),
+                (STAGE4_CARDS, '⬅️ Назад'): lambda: go_back(chat_id, user_id)
+            }
+            
+            for (state, action_text), action in stage_actions.items():
+                if current_state == state and (action_text == text or state == STAGE1 or state == STAGE2_REFORMULATE):
+                    action()
+                    return
+            
+            if current_state == STAGE4_CARDS:
+                send_message(chat_id, "Используйте кнопки для навигации.", reply_markup=get_stage_keyboard('stage4'))
+
+        elif 'callback_query' in update:
+            callback_query = update['callback_query']
+            message = callback_query['message']
+            chat_id = message['chat']['id']
+            message_id = message['message_id']
+            user_id = callback_query['from']['id']
+            callback_query_id = callback_query['id']
+            data = callback_query['data']
+            
+            callback_actions = {
+                'throw_dice': lambda: stage2_throw_dice(chat_id, message_id, user_id, callback_query_id),
+                'reformulate': lambda: stage2_reformulate(chat_id, message_id, user_id, callback_query_id),
+                'next_stage': lambda: stage2_next(chat_id, message_id, user_id, callback_query_id),
+                'ready_for_shapes': lambda: stage3_show_shapes(chat_id, message_id, user_id, callback_query_id)
+            }
+            
+            if data in callback_actions:
+                callback_actions[data]()
+            elif data.startswith('shape_'):
+                shape_key = data.replace('shape_', '')
+                current_state = user_states.get(user_id, START)
+                if current_state == STAGE3_FIRST_CHOICE:
+                    stage3_first_choice(chat_id, message_id, user_id, shape_key, callback_query_id)
+                elif current_state == STAGE3_SECOND_CHOICE:
+                    stage3_second_choice(chat_id, message_id, user_id, shape_key, callback_query_id)
+            else:
+                answer_callback_query(callback_query_id, "Действие недоступно")
+                
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        logger.error(f"Update content: {update}")
+
+# Проверка подключения и файлов
+def test_bot_connection():
+    logger.info("Тестирование подключения к боту...")
+    result = api_request('getMe')
+    if result and result.get('ok'):
+        logger.info(f"✅ Бот подключен успешно! Имя бота: {result['result']['first_name']}")
+        return True
+    else:
+        logger.error("❌ Ошибка подключения к боту")
+        return False
+
+def check_required_files():
+    logger.info("Проверка необходимых файлов...")
+    missing_files = []
+    
+    for shape, filename in SHAPE_DESCRIPTION_FILES.items():
+        if not os.path.exists(filename):
+            missing_files.append(filename)
+    
+    for i in range(1, 53):
+        card_file = f"/home/Algoritek/images/метафорические карты вызов-изображения-{i}.jpg"
+        if not os.path.exists(card_file):
+            missing_files.append(card_file)
+    
+    if missing_files:
+        logger.error(f"❌ Отсутствуют файлы: {len(missing_files)}")
+        return False
+    else:
+        logger.info("✅ Все файлы на месте")
+        return True
+
+# Основная функция
+def main():
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    logger.info("=" * 50)
+    logger.info("Запуск бота...")
+    logger.info(f"Токен бота: {TOKEN[:10]}...{TOKEN[-5:]}")
+    logger.info(f"ID администратора: {ADMIN_ID}")
+    logger.info("=" * 50)
+
+    if not test_bot_connection():
+        logger.error("Не удалось подключиться к боту. Завершаем работу.")
+        return
+
+    if not check_required_files():
+        logger.warning("Некоторые файлы отсутствуют, но продолжаем работу...")
+
+    offset, processed_updates = 0, 0
+    logger.info("Бот готов к работе. Ожидание сообщений...")
+    
+    for iteration in range(100):
+        try:
+            result = api_request(f'getUpdates?offset={offset}&timeout=10')
+            if result and result.get('ok') and result['result']:
+                logger.info(f"Получено {len(result['result'])} обновлений")
+                for update in result['result']:
+                    offset = update['update_id'] + 1
+                    process_update(update)
+                    processed_updates += 1
+            elif iteration % 10 == 0:
+                logger.info(f"Итерация {iteration+1}: нет новых сообщений")
+        except Exception as e:
+            logger.error(f"Ошибка в основном цикле: {e}")
+        
+        time.sleep(0.5)
+    
+    logger.info(f"Завершение работы. Обработано сообщений: {processed_updates}")
+
+if __name__ == '__main__':
+    main()
