@@ -1,0 +1,1051 @@
+import logging
+import random
+import requests
+import json
+import time
+import os
+import sys
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Создаем Flask приложение
+app = Flask(__name__)
+
+# ========================
+# КОНФИГУРАЦИЯ
+# ========================
+TOKEN = "8180790759:AAG9G76WQASopp_861C1vpVf5NNxD_9yAec"
+BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
+ADMIN_ID = 5237089765
+
+# Определяем URL для вебхука
+if os.getenv('RAILWAY_STATIC_URL'):
+    WEBHOOK_URL = f"{os.getenv('RAILWAY_STATIC_URL')}"
+elif os.getenv('FLY_APP_NAME'):
+    WEBHOOK_URL = f"https://{os.getenv('FLY_APP_NAME')}.fly.dev"
+else:
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+
+logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
+
+# ========================
+# СОСТОЯНИЯ И ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ========================
+(START, STAGE1, STAGE2, STAGE3, STAGE4, STAGE5) = range(6)
+user_states = {}
+user_data = {}
+
+# ========================
+# ФУНКЦИИ TELEGRAM API
+# ========================
+
+def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
+    """Отправка сообщения в Telegram"""
+    url = f"{BASE_URL}/sendMessage"
+    
+    payload = {
+        'chat_id': chat_id,
+        'text': text[:4096],  # Ограничение Telegram
+        'parse_mode': parse_mode
+    }
+    
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        result = response.json()
+        
+        if not result.get('ok'):
+            logger.error(f"Ошибка отправки сообщения: {result}")
+            # Попробуем отправить без parse_mode
+            if parse_mode == 'HTML':
+                del payload['parse_mode']
+                response = requests.post(url, json=payload, timeout=10)
+                return response.json()
+        
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сообщения: {e}")
+        return None
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    """Ответ на callback query"""
+    url = f"{BASE_URL}/answerCallbackQuery"
+    payload = {
+        'callback_query_id': callback_query_id,
+        'show_alert': show_alert
+    }
+    
+    if text:
+        payload['text'] = text
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Ошибка при ответе на callback: {e}")
+        return None
+
+# ========================
+# КЛАВИАТУРЫ
+# ========================
+
+def create_reply_keyboard(buttons, resize_keyboard=True, one_time_keyboard=False):
+    """Создание reply клавиатуры"""
+    return {
+        'keyboard': buttons,
+        'resize_keyboard': resize_keyboard,
+        'one_time_keyboard': one_time_keyboard
+    }
+
+def create_inline_keyboard(buttons):
+    """Создание inline клавиатуры"""
+    return {'inline_keyboard': buttons}
+
+def get_main_menu_keyboard():
+    """Главное меню"""
+    return create_reply_keyboard([
+        ['🎯 НАЧАТЬ ИГРУ'],
+        ['👤 Мой ID', '🆘 Помощь']
+    ])
+
+def get_stage1_keyboard():
+    """Клавиатура для этапа 1"""
+    return create_reply_keyboard([
+        ['⬅️ Назад', '➡️ Далее'],
+        ['🆘 Помощь', '👤 Мой ID']
+    ])
+
+def get_stage2_keyboard():
+    """Клавиатура для этапа 2"""
+    return create_reply_keyboard([
+        ['⬅️ Назад', '🎲 Бросить кубик'],
+        ['🆘 Помощь', '👤 Мой ID']
+    ])
+
+def get_stage3_keyboard():
+    """Клавиатура для этапа 3"""
+    return create_reply_keyboard([
+        ['⬅️ Назад', '🔘 Выбрать фигуры'],
+        ['🆘 Помощь', '👤 Мой ID']
+    ])
+
+# ========================
+# ОСНОВНЫЕ ФУНКЦИИ БОТА
+# ========================
+
+def start_command(chat_id, user_id, first_name):
+    """Обработка команды /start"""
+    user_states[user_id] = START
+    user_data[user_id] = {}
+    
+    welcome_text = f"""👋 <b>Привет, {first_name}!</b> Добро пожаловать в психологическую игру «Вызов!»
+
+🌟 <b>Это путешествие к себе через 5 этапов:</b>
+1. 🧩 Формулировка запроса
+2. 🎲 Калибровка интуицией  
+3. 🔺 Психогеометрия личности
+4. 🃏 Метафорические карты
+5. 🪜 Лестница Успеха (12 ступеней)
+
+<b>Готовы начать?</b>"""
+    
+    send_message(chat_id, welcome_text, reply_markup=get_main_menu_keyboard())
+
+def help_command(chat_id):
+    """Показать справку"""
+    help_text = """🆘 <b>Помощь по игре "Вызов!"</b>
+
+<b>Этапы игры:</b>
+1. 🧩 Формулировка запроса
+2. 🎲 Калибровка запроса  
+3. 🔺 Психогеометрия личности
+4. 🃏 Метафорические карты
+5. 🪜 Лестница Успеха (12 ступеней)
+
+<b>Навигация:</b>
+• Используйте кнопки для перемещения между этапами
+• 🎴 Вытянуть карту - доступно в любой момент
+• 🎲 Бросить кубик - для случайного выбора
+• 🆘 Помощь - эта справка
+• 👤 Мой ID - ваш идентификатор"""
+    
+    send_message(chat_id, help_text)
+
+def my_id_command(chat_id, user_id, first_name):
+    """Показать ID пользователя"""
+    user_info = f"""👤 <b>Ваша информация:</b>
+
+🆔 <b>ID пользователя:</b> <code>{user_id}</code>
+👤 <b>Имя:</b> {first_name}"""
+    
+    send_message(chat_id, user_info)
+
+def begin_game(chat_id, user_id):
+    """Начало игры"""
+    user_states[user_id] = STAGE1
+    user_data[user_id]['stage'] = 1
+    
+    stage1_text = """🧩 <b>Этап 1. Формулируем запрос</b>
+
+💬 <b>С каким вопросом или целью вы пришли в игру?</b>
+
+📌 <b>Напишите коротко ваш запрос:</b>
+• "Хочу понять..." 
+• "Нужно разобраться..."
+• "Интересно узнать..." """
+    
+    send_message(chat_id, stage1_text, reply_markup=get_stage1_keyboard())
+
+def handle_stage1_response(chat_id, user_id, text):
+    """Обработка ответа на этапе 1"""
+    user_data[user_id]['request'] = text
+    user_states[user_id] = STAGE2
+    
+    confirmation_text = f"""✅ <b>Запрос сохранен:</b> 
+«{text}»
+
+🎲 <b>Этап 2. Калибровка запроса</b>
+
+Проверим вашу интуицию! Бросьте кубик."""
+    
+    send_message(chat_id, confirmation_text, reply_markup=get_stage2_keyboard())
+    
+    # Добавляем inline кнопку для броска кубика
+    keyboard = create_inline_keyboard([
+        [{'text': '🎲 Бросить кубик', 'callback_data': 'throw_dice'}]
+    ])
+    send_message(chat_id, "Нажмите кнопку ниже чтобы бросить кубик:", reply_markup=keyboard)
+
+def throw_dice_callback(chat_id, message_id, user_id, callback_id):
+    """Обработка броска кубика"""
+    answer_callback_query(callback_id, "Бросаем кубик...")
+    
+    dice_roll = random.randint(1, 6)
+    is_even = dice_roll % 2 == 0
+    result_text = "ДА" if is_even else "НЕТ"
+    
+    user_data[user_id]['dice_result'] = {
+        'roll': dice_roll,
+        'result': result_text
+    }
+    
+    message = f"""🎲 <b>Результат броска:</b>
+
+Выпало число: <b>{dice_roll}</b>
+Интуиция говорит: <b>{result_text}</b>
+
+"""
+    
+    if is_even:
+        message += "✅ <b>Отлично! Ваш запрос резонирует с интуицией.</b>"
+        keyboard = create_inline_keyboard([
+            [{'text': '➡️ Перейти к этапу 3', 'callback_data': 'go_to_stage3'}]
+        ])
+    else:
+        message += "🤔 <b>Интересно! Возможно, стоит глубже исследовать запрос.</b>"
+        keyboard = create_inline_keyboard([
+            [{'text': '🔄 Переформулировать', 'callback_data': 'reformulate'}],
+            [{'text': '➡️ Продолжить', 'callback_data': 'go_to_stage3'}]
+        ])
+    
+    # Отправляем новое сообщение с результатом
+    send_message(chat_id, message, reply_markup=keyboard)
+
+def reformulate_callback(chat_id, user_id, callback_id):
+    """Переформулировка запроса"""
+    answer_callback_query(callback_id, "Введите новый запрос...")
+    user_states[user_id] = STAGE1
+    
+    reformulate_text = """🔄 <b>Переформулируем запрос</b>
+
+Попробуйте посмотреть на ситуацию под другим углом. Напишите новый вариант:"""
+    
+    send_message(chat_id, reformulate_text, reply_markup=get_stage1_keyboard())
+
+def go_to_stage3_callback(chat_id, user_id, callback_id):
+    """Переход к этапу 3"""
+    answer_callback_query(callback_id, "Переходим к психогеометрии...")
+    user_states[user_id] = STAGE3
+    
+    intro_text = """🔺 <b>Этап 3. Психогеометрия личности</b>
+
+<b>Выберите 2 фигуры из 5, которые вам ближе всего.</b>
+
+<i>Каждая фигура отражает определённые черты характера:</i>"""
+    
+    send_message(chat_id, intro_text, reply_markup=get_stage3_keyboard())
+    
+    # Показываем фигуры с описаниями
+    shapes_info = [
+        "🔷 <b>Квадрат</b>: Организованный, практичный, надёжный",
+        "🔺 <b>Треугольник</b>: Лидер, целеустремлённый, амбициозный", 
+        "⚪ <b>Круг</b>: Дружелюбный, заботливый, коммуникабельный",
+        "🌀 <b>Зигзаг</b>: Креативный, инновационный, непредсказуемый",
+        "🔶 <b>Прямоугольник</b>: В поиске, в переходном состоянии"
+    ]
+    
+    for shape in shapes_info:
+        send_message(chat_id, shape)
+        time.sleep(0.5)
+    
+    # Inline клавиатура для выбора
+    keyboard = create_inline_keyboard([
+        [{'text': '🔷 Квадрат', 'callback_data': 'shape_square'}],
+        [{'text': '🔺 Треугольник', 'callback_data': 'shape_triangle'}],
+        [{'text': '⚪ Круг', 'callback_data': 'shape_circle'}],
+        [{'text': '🌀 Зигзаг', 'callback_data': 'shape_zigzag'}],
+        [{'text': '🔶 Прямоугольник', 'callback_data': 'shape_rectangle'}]
+    ])
+    
+    send_message(chat_id, "Выберите первую фигуру:", reply_markup=keyboard)
+
+def handle_shape_selection(chat_id, user_id, shape_name, callback_id):
+    """Обработка выбора фигуры"""
+    if 'shapes' not in user_data[user_id]:
+        user_data[user_id]['shapes'] = []
+    
+    user_data[user_id]['shapes'].append(shape_name)
+    selected_count = len(user_data[user_id]['shapes'])
+    
+    shape_display_names = {
+        'shape_square': '🔷 Квадрат',
+        'shape_triangle': '🔺 Треугольник', 
+        'shape_circle': '⚪ Круг',
+        'shape_zigzag': '🌀 Зигзаг',
+        'shape_rectangle': '🔶 Прямоугольник'
+    }
+    
+    display_name = shape_display_names.get(shape_name, shape_name)
+    
+    if selected_count == 1:
+        answer_callback_query(callback_id, f"Выбрана первая фигура: {display_name}")
+        
+        # Показываем оставшиеся фигуры для второго выбора
+        remaining_shapes = [
+            ('🔷 Квадрат', 'shape_square'),
+            ('🔺 Треугольник', 'shape_triangle'),
+            ('⚪ Круг', 'shape_circle'),
+            ('🌀 Зигзаг', 'shape_zigzag'),
+            ('🔶 Прямоугольник', 'shape_rectangle')
+        ]
+        
+        # Убираем уже выбранную фигуру
+        remaining_shapes = [s for s in remaining_shapes if s[1] != shape_name]
+        
+        keyboard_buttons = []
+        for display, callback_data in remaining_shapes:
+            keyboard_buttons.append([{'text': display, 'callback_data': callback_data}])
+        
+        keyboard = create_inline_keyboard(keyboard_buttons)
+        send_message(chat_id, "Отлично! Теперь выберите вторую фигуру:", reply_markup=keyboard)
+        
+    elif selected_count == 2:
+        answer_callback_query(callback_id, f"Выбрана вторая фигура: {display_name}")
+        
+        # Завершаем этап 3
+        final_text = """✨ <b>Отлично! Этап психогеометрии завершен.</b>
+
+<b>Ваши выбранные фигуры:</b>"""
+        
+        for shape_callback in user_data[user_id]['shapes']:
+            shape_name = shape_display_names.get(shape_callback, shape_callback)
+            final_text += f"\n• {shape_name}"
+        
+        final_text += "\n\nКаждая фигура отражает ваши сильные стороны и потенциал для развития."
+        
+        send_message(chat_id, final_text)
+        
+        # Переход к следующему этапу
+        time.sleep(2)
+        go_to_stage4(chat_id, user_id)
+
+def go_to_stage4(chat_id, user_id):
+    """Переход к этапу 4"""
+    user_states[user_id] = STAGE4
+    
+    intro_text = """🃏 <b>Этап 4. Метафорические карты</b>
+
+Карты - это зеркало вашего бессознательного. 
+
+Вы можете вытягивать карты в любой момент для получения инсайтов и подсказок."""
+    
+    keyboard = create_reply_keyboard([
+        ['🎴 Вытянуть карту', '🤔 Помощь в интерпретации'],
+        ['⬅️ Назад', '🪜 К Лестнице Успеха'],
+        ['🆘 Помощь', '👤 Мой ID']
+    ])
+    
+    send_message(chat_id, intro_text, reply_markup=keyboard)
+
+def draw_card(chat_id, user_id):
+    """Вытягивание метафорической карты"""
+    card_id = random.randint(1, 52)
+    
+    # Исправленная строка: убраны лишние кавычки
+    card_texts = [
+        f"""🎴 <b>Карта #{card_id}: Путь к себе</b>
+
+Эта карта говорит о вашем внутреннем пути.
+Задайте себе вопрос: "Куда я иду и зачем?""",
+        
+        f"""🎴 <b>Карта #{card_id}: Преодоление преград</b>
+
+Карта указывает на возможные препятствия.
+Спросите себя: "Что мне мешает двигаться вперед?""",
+        
+        f"""🎴 <b>Карта #{card_id}: Внутренний ресурс</b>
+
+Эта карта показывает ваш скрытый потенциал.
+Подумайте: "В какой области я сильнее, чем думаю?"""
+    ]
+    
+    card_text = random.choice(card_texts)
+    send_message(chat_id, card_text)
+
+def go_to_stage5(chat_id, user_id):
+    """Переход к этапу 5"""
+    user_states[user_id] = STAGE5
+    
+    intro_text = """🪜 <b>Этап 5. Лестница Успеха (12 ступеней)</b>
+
+Теперь начинается настоящее движение!
+Каждая ступень - это шаг к трансформации.
+
+<b>Первая ступень: Целеполагание</b>
+
+Определите конечную точку своего пути.
+Как вы поймёте, что достигли успеха?
+
+<b>Задание:</b>
+Опишите свою идеальную профессиональную реальность через 6 месяцев."""
+    
+    keyboard = create_reply_keyboard([
+        ['➡️ Следующая ступень', '⬅️ Предыдущая ступень'],
+        ['🎴 Вытянуть карту', '🎲 Бросить кубик'],
+        ['🆘 Помощь', '👤 Мой ID'],
+        ['↩️ В главное меню', '🏁 Завершить игру']
+    ])
+    
+    send_message(chat_id, intro_text, reply_markup=keyboard)
+
+def complete_game(chat_id, user_id):
+    """Завершение игры"""
+    completion_text = """🏆 <b>Поздравляем! Вы завершили игру "Вызов!"</b>
+
+Это было удивительное путешествие к себе.
+Помните: трансформация — это процесс, а не конечная точка.
+
+🔄 Вы можете пройти игру снова с новым запросом
+или углубиться в те ступени, которые вызвали наибольший отклик.
+
+<b>Спасибо за участие!</b>"""
+    
+    send_message(chat_id, completion_text, reply_markup=get_main_menu_keyboard())
+    user_states[user_id] = START
+
+# ========================
+# ОБРАБОТКА ОБНОВЛЕНИЙ
+# ========================
+
+def process_update(update):
+    """Обработка входящего обновления от Telegram"""
+    try:
+        # Логируем полученное обновление
+        logger.info(f"Получено обновление: {json.dumps(update, ensure_ascii=False)[:500]}...")
+        
+        # Обработка callback query (inline кнопки)
+        if 'callback_query' in update:
+            callback_query = update['callback_query']
+            user_id = callback_query['from']['id']
+            chat_id = callback_query['message']['chat']['id']
+            message_id = callback_query['message']['message_id']
+            callback_id = callback_query['id']
+            data = callback_query['data']
+            
+            logger.info(f"Callback от {user_id}: {data}")
+            
+            if data == 'throw_dice':
+                throw_dice_callback(chat_id, message_id, user_id, callback_id)
+            elif data == 'reformulate':
+                reformulate_callback(chat_id, user_id, callback_id)
+            elif data == 'go_to_stage3':
+                go_to_stage3_callback(chat_id, user_id, callback_id)
+            elif data.startswith('shape_'):
+                handle_shape_selection(chat_id, user_id, data, callback_id)
+            
+            return
+        
+        # Обработка обычного сообщения
+        if 'message' not in update:
+            return
+            
+        message = update['message']
+        chat_id = message['chat']['id']
+        user_id = message['from']['id']
+        first_name = message['from'].get('first_name', 'Пользователь')
+        text = message.get('text', '').strip()
+        
+        logger.info(f"Сообщение от {user_id} ({first_name}): {text}")
+        
+        # Инициализация пользователя
+        if user_id not in user_states:
+            user_states[user_id] = START
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        
+        current_state = user_states.get(user_id, START)
+        
+        # Обработка команд
+        if text.startswith('/start'):
+            start_command(chat_id, user_id, first_name)
+            return
+        
+        # Обработка кнопок главного меню
+        if text == '🎯 НАЧАТЬ ИГРУ' and current_state == START:
+            begin_game(chat_id, user_id)
+            return
+        elif text == '🆘 Помощь':
+            help_command(chat_id)
+            return
+        elif text == '👤 Мой ID':
+            my_id_command(chat_id, user_id, first_name)
+            return
+        elif text == '↩️ В главное меню':
+            start_command(chat_id, user_id, first_name)
+            return
+        
+        # Обработка кнопки Назад
+        elif text == '⬅️ Назад':
+            if current_state > START:
+                user_states[user_id] = current_state - 1
+                if current_state == STAGE1:
+                    start_command(chat_id, user_id, first_name)
+                elif current_state == STAGE2:
+                    begin_game(chat_id, user_id)
+                elif current_state == STAGE3:
+                    # Вернуться к броску кубика
+                    user_states[user_id] = STAGE2
+                    send_message(chat_id, "Возвращаемся к этапу 2...", reply_markup=get_stage2_keyboard())
+            else:
+                start_command(chat_id, user_id, first_name)
+            return
+        
+        # Обработка кнопки Далее
+        elif text == '➡️ Далее' and current_state == STAGE1:
+            if 'request' in user_data[user_id]:
+                handle_stage1_response(chat_id, user_id, user_data[user_id]['request'])
+            else:
+                send_message(chat_id, "Сначала напишите свой запрос.")
+            return
+        
+        # Обработка этапа 1 (ввод запроса)
+        elif current_state == STAGE1 and text not in ['⬅️ Назад', '➡️ Далее', '🆘 Помощь', '👤 Мой ID']:
+            handle_stage1_response(chat_id, user_id, text)
+            return
+        
+        # Обработка кнопок этапа 2
+        elif text == '🎲 Бросить кубик' and current_state == STAGE2:
+            keyboard = create_inline_keyboard([
+                [{'text': '🎲 Бросить кубик', 'callback_data': 'throw_dice'}]
+            ])
+            send_message(chat_id, "Нажмите кнопку чтобы бросить кубик:", reply_markup=keyboard)
+            return
+        
+        # Обработка кнопок этапа 3
+        elif text == '🔘 Выбрать фигуры' and current_state == STAGE3:
+            go_to_stage3_callback(chat_id, user_id, None)
+            return
+        
+        # Обработка кнопок этапа 4
+        elif current_state == STAGE4:
+            if text == '🎴 Вытянуть карту':
+                draw_card(chat_id, user_id)
+                return
+            elif text == '🪜 К Лестнице Успеха':
+                go_to_stage5(chat_id, user_id)
+                return
+        
+        # Обработка кнопок этапа 5
+        elif current_state == STAGE5:
+            if text == '🏁 Завершить игру':
+                complete_game(chat_id, user_id)
+                return
+            elif text == '🎴 Вытянуть карту':
+                draw_card(chat_id, user_id)
+                return
+            elif text == '🎲 Бросить кубик':
+                dice_roll = random.randint(1, 6)
+                send_message(chat_id, f"🎲 Выпало: {dice_roll}")
+                return
+        
+        # Если сообщение не обработано, показываем подсказку
+        if text:
+            if current_state == START:
+                send_message(chat_id, "Используйте кнопки меню для навигации.", reply_markup=get_main_menu_keyboard())
+            elif current_state == STAGE1:
+                send_message(chat_id, "Напишите ваш запрос или используйте кнопки навигации.", reply_markup=get_stage1_keyboard())
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки обновления: {e}", exc_info=True)
+
+# ========================
+# FLASK РОУТЫ
+# ========================
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Основной webhook для Telegram"""
+    try:
+        update = request.get_json()
+        
+        # Проверяем наличие обновления
+        if not update:
+            logger.warning("Получен пустой запрос")
+            return jsonify({'status': 'ok'}), 200
+        
+        # Асинхронная обработка
+        process_update(update)
+        
+        return jsonify({'status': 'ok'}), 200
+        
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook_route():
+    """Установка webhook"""
+    try:
+        # Определяем URL для вебхука
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/webhook"
+        else:
+            # Если запускаем локально, используем ngrok или localhost
+            if request.host_url and 'localhost' in request.host_url:
+                return "Запустите ngrok и используйте полученный URL", 200
+            webhook_url = f"{request.host_url.rstrip('/')}/webhook"
+        
+        logger.info(f"Попытка установить вебхук на: {webhook_url}")
+        
+        # Устанавливаем вебхук
+        url = f"{BASE_URL}/setWebhook"
+        payload = {
+            'url': webhook_url,
+            'drop_pending_updates': True,
+            'allowed_updates': ['message', 'callback_query']
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        result = response.json()
+        
+        logger.info(f"Результат установки вебхука: {result}")
+        
+        if result.get('ok'):
+            # Отправляем тестовое сообщение администратору
+            try:
+                test_message = f"✅ Вебхук установлен!\nURL: {webhook_url}\nБот готов к работе!"
+                send_message(ADMIN_ID, test_message)
+            except:
+                logger.warning("Не удалось отправить тестовое сообщение")
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'✅ Webhook установлен: {webhook_url}',
+                'result': result
+            })
+        else:
+            error_msg = result.get('description', 'Неизвестная ошибка')
+            return jsonify({
+                'status': 'error',
+                'message': f'❌ Ошибка: {error_msg}',
+                'result': result
+            })
+            
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/delete_webhook', methods=['GET'])
+def delete_webhook_route():
+    """Удаление webhook"""
+    try:
+        url = f"{BASE_URL}/deleteWebhook"
+        response = requests.post(url, timeout=10)
+        result = response.json()
+        
+        if result.get('ok'):
+            return jsonify({'status': 'success', 'message': '✅ Webhook удален'})
+        else:
+            return jsonify({'status': 'error', 'message': f'❌ Ошибка: {result.get("description")}'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Проверка здоровья приложения"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat(),
+        'users_online': len(user_states),
+        'bot_token': TOKEN[:10] + '...' + TOKEN[-5:] if TOKEN else 'не установлен'
+    })
+
+@app.route('/test', methods=['GET'])
+def test_bot():
+    """Тестовая страница - отправка тестового сообщения"""
+    chat_id = request.args.get('chat_id', ADMIN_ID)
+    
+    try:
+        result = send_message(chat_id, "✅ <b>Тестовое сообщение от бота!</b>\n\nБот работает корректно.")
+        
+        return jsonify({
+            'status': 'success' if result and result.get('ok') else 'error',
+            'message': 'Тестовое сообщение отправлено',
+            'result': result
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/')
+def index():
+    """Главная страница"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Психологическая игра "Вызов!"</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            
+            .container {
+                max-width: 800px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            }
+            
+            h1 {
+                color: #4a5568;
+                text-align: center;
+                margin-bottom: 10px;
+                font-size: 2.5em;
+            }
+            
+            .subtitle {
+                text-align: center;
+                color: #718096;
+                margin-bottom: 30px;
+                font-size: 1.2em;
+            }
+            
+            .status-card {
+                background: #f7fafc;
+                border-radius: 10px;
+                padding: 20px;
+                margin: 20px 0;
+                border-left: 4px solid #48bb78;
+            }
+            
+            .status-card.error {
+                border-left-color: #f56565;
+            }
+            
+            .buttons {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 30px 0;
+            }
+            
+            .btn {
+                display: block;
+                padding: 15px 20px;
+                text-align: center;
+                background: #4c51bf;
+                color: white;
+                text-decoration: none;
+                border-radius: 10px;
+                font-weight: bold;
+                transition: all 0.3s ease;
+                border: none;
+                cursor: pointer;
+                font-size: 16px;
+            }
+            
+            .btn:hover {
+                background: #434190;
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            }
+            
+            .btn-primary {
+                background: #4c51bf;
+            }
+            
+            .btn-secondary {
+                background: #718096;
+            }
+            
+            .btn-danger {
+                background: #f56565;
+            }
+            
+            .btn-success {
+                background: #48bb78;
+            }
+            
+            .stats {
+                background: #edf2f7;
+                border-radius: 10px;
+                padding: 20px;
+                margin-top: 30px;
+            }
+            
+            .stats h3 {
+                margin-bottom: 15px;
+                color: #4a5568;
+            }
+            
+            .stat-item {
+                display: flex;
+                justify-content: space-between;
+                padding: 10px 0;
+                border-bottom: 1px solid #e2e8f0;
+            }
+            
+            .stat-item:last-child {
+                border-bottom: none;
+            }
+            
+            .instructions {
+                background: #fffaf0;
+                border-radius: 10px;
+                padding: 25px;
+                margin-top: 30px;
+                border: 1px solid #feebc8;
+            }
+            
+            .instructions h3 {
+                color: #dd6b20;
+                margin-bottom: 15px;
+            }
+            
+            .instructions ol {
+                margin-left: 20px;
+            }
+            
+            .instructions li {
+                margin-bottom: 10px;
+            }
+            
+            @media (max-width: 600px) {
+                .container {
+                    padding: 20px;
+                }
+                
+                h1 {
+                    font-size: 2em;
+                }
+                
+                .buttons {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 Психологическая игра "Вызов!"</h1>
+            <p class="subtitle">Трансформационная психологическая игра в Telegram</p>
+            
+            <div class="status-card">
+                <strong>Статус:</strong> ✅ Бот работает<br>
+                <strong>Пользователей онлайн:</strong> """ + str(len(user_states)) + """<br>
+                <strong>Токен бота:</strong> """ + (TOKEN[:10] + '...' + TOKEN[-5:] if TOKEN else 'не установлен') + """
+            </div>
+            
+            <div class="buttons">
+                <a href="/set_webhook" class="btn btn-primary">🔄 Установить вебхук</a>
+                <a href="/delete_webhook" class="btn btn-danger">🗑️ Удалить вебхук</a>
+                <a href="/health" class="btn btn-secondary">❤️ Проверка здоровья</a>
+                <a href="/test" class="btn btn-success">📨 Тест бота</a>
+            </div>
+            
+            <div class="stats">
+                <h3>📊 Статистика системы</h3>
+                <div class="stat-item">
+                    <span>Запущен:</span>
+                    <span>""" + datetime.now().strftime("%d.%m.%Y %H:%M") + """</span>
+                </div>
+                <div class="stat-item">
+                    <span>Активных пользователей:</span>
+                    <span>""" + str(len(user_states)) + """</span>
+                </div>
+                <div class="stat-item">
+                    <span>Версия Python:</span>
+                    <span>""" + sys.version.split()[0] + """</span>
+                </div>
+            </div>
+            
+            <div class="instructions">
+                <h3>📝 Инструкция по настройке</h3>
+                <ol>
+                    <li>Нажмите "Установить вебхук"</li>
+                    <li>Перейдите в Telegram к <a href="https://t.me/your_bot_username" target="_blank">вашему боту</a></li>
+                    <li>Отправьте команду <code>/start</code></li>
+                    <li>Используйте кнопки для навигации по игре</li>
+                </ol>
+                <p><strong>Примечание:</strong> Для локальной разработки используйте <a href="https://ngrok.com/" target="_blank">ngrok</a></p>
+            </div>
+            
+            <div style="text-align: center; margin-top: 30px; color: #718096; font-size: 0.9em;">
+                <p>🤖 Бот "Вызов!" • Психологическая трансформационная игра</p>
+            </div>
+        </div>
+        
+        <script>
+            // Автоматическое обновление статистики каждые 30 секунд
+            setInterval(function() {
+                fetch('/health')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.users_online !== undefined) {
+                            // Обновляем счетчик пользователей
+                            const userCountElements = document.querySelectorAll('strong:contains("Пользователей онлайн:")');
+                            userCountElements.forEach(el => {
+                                el.nextSibling.textContent = ' ' + data.users_online;
+                            });
+                        }
+                    });
+            }, 30000);
+            
+            // Добавляем обработчики для кнопок
+            document.querySelectorAll('.btn').forEach(button => {
+                button.addEventListener('click', function(e) {
+                    if (this.href.includes('set_webhook') || this.href.includes('delete_webhook')) {
+                        e.preventDefault();
+                        const url = this.href;
+                        const buttonText = this.textContent;
+                        
+                        this.textContent = '⏳ Обработка...';
+                        this.disabled = true;
+                        
+                        fetch(url)
+                            .then(response => response.json())
+                            .then(data => {
+                                alert(data.message || data.error || 'Операция выполнена');
+                                this.textContent = buttonText;
+                                this.disabled = false;
+                            })
+                            .catch(error => {
+                                alert('Ошибка: ' + error);
+                                this.textContent = buttonText;
+                                this.disabled = false;
+                            });
+                    }
+                });
+            });
+        </script>
+    </body>
+    </html>
+    """
+
+# ========================
+# ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
+# ========================
+
+def initialize_bot():
+    """Инициализация бота при запуске"""
+    logger.info("=" * 60)
+    logger.info("🚀 ИНИЦИАЛИЗАЦИЯ БОТА 'ВЫЗОВ!'")
+    logger.info("=" * 60)
+    
+    # Проверяем токен
+    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
+        logger.error("❌ ТОКЕН БОТА НЕ НАСТРОЕН!")
+        logger.error("Пожалуйста, установите правильный токен бота.")
+        return False
+    
+    # Проверяем подключение к Telegram API
+    try:
+        url = f"{BASE_URL}/getMe"
+        response = requests.get(url, timeout=10)
+        result = response.json()
+        
+        if result.get('ok'):
+            bot_name = result['result']['first_name']
+            bot_username = result['result'].get('username', 'нет')
+            
+            logger.info(f"✅ БОТ ПОДКЛЮЧЕН: {bot_name} (@{bot_username})")
+            logger.info(f"📊 ID администратора: {ADMIN_ID}")
+            
+            # Проверяем текущий вебхук
+            webhook_info = requests.get(f"{BASE_URL}/getWebhookInfo", timeout=10).json()
+            if webhook_info.get('ok'):
+                current_url = webhook_info['result'].get('url', 'не установлен')
+                logger.info(f"🌐 Текущий вебхук: {current_url}")
+            
+            return True
+        else:
+            logger.error(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ К БОТУ: {result.get('description')}")
+            logger.error("Проверьте:")
+            logger.error("1. Правильность токена")
+            logger.error("2. Доступность интернета")
+            logger.error("3. Что бот активирован через @BotFather")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА ПРИ ПОДКЛЮЧЕНИИ К TELEGRAM API: {e}")
+        return False
+
+if __name__ == '__main__':
+    # Инициализируем бота
+    if initialize_bot():
+        port = int(os.getenv('PORT', 8080))
+        host = '0.0.0.0'
+        
+        logger.info(f"🌐 Запуск веб-сервера на {host}:{port}")
+        logger.info(f"📞 Webhook URL: {WEBHOOK_URL}/webhook" if WEBHOOK_URL else "📞 Webhook URL: будет определен при запуске")
+        logger.info("=" * 60)
+        logger.info("✅ Бот готов к работе!")
+        logger.info("=" * 60)
+        
+        # Запускаем Flask приложение
+        app.run(
+            host=host,
+            port=port,
+            debug=False,
+            threaded=True
+        )
+    else:
+        logger.error("❌ Не удалось инициализировать бота. Приложение завершено.")
+        sys.exit(1)
